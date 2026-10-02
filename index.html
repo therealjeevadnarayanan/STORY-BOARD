@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Greenboard</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#1a2a22">
+<style>
+:root{--g:#2a4435;--bar:#1a2a22;--paper:#f1ecdd;--ink:#1d2620;--chalk:#d9e4d3;--red:#c0503a}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--g);color:var(--chalk);font:15px system-ui,sans-serif}
+body{display:flex;flex-direction:column}
+header{padding:calc(8px + env(safe-area-inset-top,0px)) 10px 8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;background:var(--bar)}
+header h1{font:700 18px Georgia,serif;margin:0 8px 0 0}
+button{font:inherit;border:1px solid #5d7a68;background:transparent;color:var(--chalk);padding:7px 11px;border-radius:6px;cursor:pointer}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid #fff;outline-offset:2px}
+button.on{background:var(--chalk);color:var(--ink)}
+#hint{width:100%;font-size:13px;opacity:.75;min-height:1.2em}
+#wrap{flex:1;overflow:auto;-webkit-overflow-scrolling:touch}
+#board{position:relative;background:radial-gradient(#ffffff1f 1.5px,transparent 1.5px) 0 0/32px 32px}
+#board.add{cursor:crosshair}
+#lines{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+#lines .l{stroke:var(--chalk);stroke-width:3;stroke-dasharray:2 7;stroke-linecap:round;pointer-events:stroke;cursor:pointer}
+#lines text{fill:var(--chalk);font:italic 14px Georgia,serif;text-anchor:middle;paint-order:stroke;stroke:var(--g);stroke-width:5px}
+.pin{position:absolute;min-width:96px;max-width:190px;padding:16px 12px 9px;background:var(--paper);color:var(--ink);border-radius:3px;box-shadow:2px 4px 0 #0000003d;touch-action:none;transform:translateX(-50%);cursor:grab;user-select:none}
+.pin::before{content:"";position:absolute;top:4px;left:50%;width:10px;height:10px;margin-left:-5px;border-radius:50%;background:var(--red)}
+.pin b{display:block;font:700 16px Georgia,serif;word-break:break-word}
+.pin small{opacity:.6}
+.pin.sel{outline:3px solid #ffd76a;outline-offset:2px}
+#panel{position:fixed;top:0;right:0;bottom:0;width:min(430px,100%);background:var(--paper);color:var(--ink);padding:calc(14px + env(safe-area-inset-top,0px)) 14px 14px;overflow:auto;box-shadow:-6px 0 20px #0006;display:none}
+#panel.open{display:block}
+#panel input.nm{width:100%;font:700 22px Georgia,serif;border:0;border-bottom:2px solid var(--ink);background:transparent;padding:4px 0;margin-bottom:12px}
+#panel button{color:var(--ink);border-color:#8a8a7a}
+.row{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
+.it{position:relative;margin:10px 0;padding-right:30px}
+.it textarea{width:100%;min-height:80px;font:inherit;padding:8px;border:1px solid #b9b5a4;border-radius:4px;background:#fffdf5}
+.it img{max-width:100%;border-radius:4px;display:block}
+.it audio{width:100%}
+.it .x{position:absolute;top:0;right:0;padding:2px 8px}
+.danger{color:var(--red)!important}
+</style></head><body>
+<header>
+  <h1>Greenboard</h1>
+  <button id="bAdd">New pin</button>
+  <button id="bCon">Connect</button>
+  <button id="bLink" hidden>Link selected</button>
+  <button id="bGrow">Grow board</button>
+  <button id="bOut">Back up</button>
+  <button id="bIn">Restore</button>
+  <input id="fIn" type="file" accept=".json" hidden>
+  <div id="hint"></div>
+</header>
+<div id="wrap"><div id="board"><svg id="lines"></svg></div></div>
+<aside id="panel" aria-label="Pin details"></aside>
+<input id="fImg" type="file" accept="image/*" multiple hidden>
+
+<script type="module">
+const $=s=>document.querySelector(s);
+const board=$('#board'),lines=$('#lines'),panel=$('#panel'),hint=$('#hint');
+let pins=[],items=[],links=[],mode='',sel=new Set(),cur=null,rec=null;
+let size=JSON.parse(localStorage.getItem('gbSize')||'{"w":3000,"h":2000}');
+
+/* ---------- storage (IndexedDB) ---------- */
+const db=await new Promise((ok,no)=>{const r=indexedDB.open('greenboard',1);
+  r.onupgradeneeded=()=>['pins','items','links'].forEach(s=>r.result.createObjectStore(s,{keyPath:'id'}));
+  r.onsuccess=()=>ok(r.result);r.onerror=no});
+const st=(s,m)=>db.transaction(s,m).objectStore(s);
+const all=s=>new Promise(r=>{const q=st(s).getAll();q.onsuccess=()=>r(q.result)});
+const put=(s,v)=>new Promise(r=>{v.updated=Date.now();st(s,'readwrite').put(v).transaction.oncomplete=r});
+const del=(s,id)=>new Promise(r=>{st(s,'readwrite').delete(id).transaction.oncomplete=r});
+navigator.storage?.persist?.();
+[pins,items,links]=await Promise.all([all('pins'),all('items'),all('links')]);
+
+/* ---------- board ---------- */
+function fit(){
+  const w=Math.max(size.w,...pins.map(p=>p.x+300)),h=Math.max(size.h,...pins.map(p=>p.y+300));
+  board.style.width=w+'px';board.style.height=h+'px';}
+function render(){
+  board.querySelectorAll('.pin').forEach(e=>e.remove());
+  for(const p of pins){
+    const e=document.createElement('div');
+    e.className='pin'+(sel.has(p.id)?' sel':'');e.dataset.id=p.id;
+    e.style.left=p.x+'px';e.style.top=p.y+'px';
+    const n=items.filter(i=>i.pin===p.id).length;
+    e.innerHTML='<b></b><small>'+n+(n==1?' item':' items')+'</small>';
+    e.firstChild.textContent=p.name;board.appendChild(e);}
+  fit();drawLinks();}
+function drawLinks(){
+  let s='';
+  for(const l of links){
+    const a=board.querySelector(`.pin[data-id="${l.a}"]`),b=board.querySelector(`.pin[data-id="${l.b}"]`);
+    if(!a||!b)continue;
+    const x1=a.offsetLeft,y1=a.offsetTop+a.offsetHeight/2,x2=b.offsetLeft,y2=b.offsetTop+b.offsetHeight/2;
+    s+=`<line class="l" data-id="${l.id}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`;
+    if(l.desc)s+=`<text x="${(x1+x2)/2}" y="${(y1+y2)/2-8}">${l.desc.replace(/[<&]/g,'')}</text>`;}
+  lines.innerHTML=s;}
+
+/* pin drag / tap */
+let drag=null;
+board.addEventListener('pointerdown',e=>{
+  const el=e.target.closest('.pin');if(!el)return;
+  const p=pins.find(x=>x.id===el.dataset.id);
+  drag={el,p,sx:e.clientX,sy:e.clientY,ox:p.x,oy:p.y,moved:false};
+  el.setPointerCapture(e.pointerId);});
+board.addEventListener('pointermove',e=>{
+  if(!drag)return;
+  const dx=e.clientX-drag.sx,dy=e.clientY-drag.sy;
+  if(!drag.moved&&Math.hypot(dx,dy)<6)return;
+  drag.moved=true;
+  drag.p.x=Math.max(0,drag.ox+dx);drag.p.y=Math.max(0,drag.oy+dy);
+  drag.el.style.left=drag.p.x+'px';drag.el.style.top=drag.p.y+'px';drawLinks();});
+board.addEventListener('pointerup',async()=>{
+  if(!drag)return;const d=drag;drag=null;
+  if(d.moved){await put('pins',d.p);fit();return;}
+  if(mode==='con'){sel.has(d.p.id)?sel.delete(d.p.id):sel.add(d.p.id);render();setHint();}
+  else openPin(d.p.id);});
+board.addEventListener('click',async e=>{
+  if(e.target.classList.contains('l')){
+    const l=links.find(x=>x.id===e.target.dataset.id);
+    if(confirm('Delete this link?')){links=links.filter(x=>x!==l);await del('links',l.id);drawLinks();}
+    else{const d=prompt('Describe the connection',l.desc||'');if(d!==null){l.desc=d;await put('links',l);drawLinks();}}
+    return;}
+  if(mode==='add'&&(e.target===board||e.target===lines)){
+    const r=board.getBoundingClientRect(),name=prompt('Name this pin');
+    if(name){const p={id:crypto.randomUUID(),name,x:Math.round(e.clientX-r.left),y:Math.round(e.clientY-r.top),created:Date.now()};
+      pins.push(p);await put('pins',p);}
+    setMode('');render();}});
+
+/* modes */
+function setMode(m){mode=m;sel.clear();
+  $('#bAdd').classList.toggle('on',m==='add');$('#bCon').classList.toggle('on',m==='con');
+  $('#bLink').hidden=m!=='con';board.classList.toggle('add',m==='add');setHint();render();}
+function setHint(){hint.textContent=mode==='add'?'Tap anywhere on the board to place the pin.'
+  :mode==='con'?'Tap two or more pins, then press Link selected. Selected: '+sel.size
+  :pins.length?'':'Press New pin, then tap the board to start.';}
+$('#bAdd').onclick=()=>setMode(mode==='add'?'':'add');
+$('#bCon').onclick=()=>setMode(mode==='con'?'':'con');
+$('#bLink').onclick=async()=>{
+  if(sel.size<2)return alert('Select at least two pins.');
+  const d=prompt('How are these connected? (optional)','');if(d===null)return;
+  const ids=[...sel];
+  for(const id of ids.slice(1)){const l={id:crypto.randomUUID(),a:ids[0],b:id,desc:d};links.push(l);await put('links',l);}
+  setMode('');};
+$('#bGrow').onclick=()=>{size.w+=1000;size.h+=700;localStorage.setItem('gbSize',JSON.stringify(size));fit();};
+
+/* ---------- pin panel ---------- */
+function openPin(id){
+  cur=id;const p=pins.find(x=>x.id===id);
+  panel.innerHTML='<input class="nm" aria-label="Pin name"><div id="list"></div>'
+    +'<div class="row"><button id="aT">Add text</button><button id="aI">Add image</button><button id="aV">Record voice</button></div>'
+    +'<div class="row"><button id="cl">Close</button><button id="dp" class="danger">Delete pin</button></div>';
+  const nm=panel.querySelector('.nm');nm.value=p.name;
+  nm.onchange=async()=>{p.name=nm.value||p.name;await put('pins',p);render();};
+  const list=$('#list');
+  for(const it of items.filter(i=>i.pin===id).sort((a,b)=>a.created-b.created)){
+    const w=document.createElement('div');w.className='it';
+    if(it.type==='text'){const t=document.createElement('textarea');t.value=it.body;
+      t.onchange=()=>{it.body=t.value;put('items',it)};w.append(t);}
+    else if(it.type==='image'){const i=document.createElement('img');i.src=URL.createObjectURL(it.body);w.append(i);}
+    else{const a=document.createElement('audio');a.controls=true;a.src=URL.createObjectURL(it.body);w.append(a);}
+    const x=document.createElement('button');x.className='x';x.textContent='×';x.setAttribute('aria-label','Delete item');
+    x.onclick=async()=>{if(confirm('Delete this item?')){items=items.filter(i=>i!==it);await del('items',it.id);openPin(id);render();}};
+    w.append(x);list.append(w);}
+  $('#aT').onclick=()=>addItem('text','');
+  $('#aI').onclick=()=>$('#fImg').click();
+  $('#aV').onclick=e=>toggleRec(e.target);
+  $('#cl').onclick=closePanel;
+  $('#dp').onclick=async()=>{
+    if(!confirm('Delete "'+p.name+'" and everything in it?'))return;
+    for(const i of items.filter(i=>i.pin===id))await del('items',i.id);
+    for(const l of links.filter(l=>l.a===id||l.b===id))await del('links',l.id);
+    items=items.filter(i=>i.pin!==id);links=links.filter(l=>l.a!==id&&l.b!==id);
+    pins=pins.filter(x=>x!==p);await del('pins',id);closePanel();render();};
+  panel.classList.add('open');}
+function closePanel(){panel.classList.remove('open');cur=null;}
+async function addItem(type,body){
+  const it={id:crypto.randomUUID(),pin:cur,type,body,created:Date.now()};
+  items.push(it);await put('items',it);openPin(cur);render();}
+$('#fImg').onchange=async e=>{
+  for(const f of e.target.files){
+    const bm=await createImageBitmap(f),k=Math.min(1,1600/Math.max(bm.width,bm.height));
+    const c=document.createElement('canvas');c.width=bm.width*k;c.height=bm.height*k;
+    c.getContext('2d').drawImage(bm,0,0,c.width,c.height);
+    await addItem('image',await new Promise(r=>c.toBlob(r,'image/jpeg',.8)));}
+  e.target.value='';};
+async function toggleRec(btn){
+  if(rec){rec.stop();return;}
+  try{
+    const s=await navigator.mediaDevices.getUserMedia({audio:true}),ch=[];
+    rec=new MediaRecorder(s);
+    rec.ondataavailable=e=>ch.push(e.data);
+    rec.onstop=async()=>{s.getTracks().forEach(t=>t.stop());const b=new Blob(ch,{type:rec.mimeType});rec=null;await addItem('audio',b);};
+    rec.start();btn.textContent='Stop recording';
+  }catch{alert('Microphone is blocked. Allow it in your browser settings and try again.');}}
+
+/* ---------- backup / restore ---------- */
+const toURL=b=>new Promise(r=>{const f=new FileReader();f.onload=()=>r(f.result);f.readAsDataURL(b)});
+$('#bOut').onclick=async()=>{
+  const data={pins,links,items:await Promise.all(items.map(async i=>i.type==='text'?i:{...i,body:await toURL(i.body)}))};
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([JSON.stringify(data)],{type:'application/json'}));
+  a.download='greenboard-'+new Date().toISOString().slice(0,10)+'.json';a.click();};
+$('#bIn').onclick=()=>$('#fIn').click();
+$('#fIn').onchange=async e=>{
+  try{
+    const d=JSON.parse(await e.target.files[0].text());
+    for(const p of d.pins)await put('pins',p);
+    for(const l of d.links)await put('links',l);
+    for(const i of d.items){if(i.type!=='text')i.body=await (await fetch(i.body)).blob();await put('items',i);}
+    [pins,items,links]=await Promise.all([all('pins'),all('items'),all('links')]);render();
+    alert('Restored.');
+  }catch{alert('That file is not a Greenboard backup.');}
+  e.target.value='';};
+
+render();setHint();
+if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js');
+</script>
+</body></html>
